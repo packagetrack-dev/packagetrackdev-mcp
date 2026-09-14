@@ -5,6 +5,13 @@ is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-15
+
+### Fixed
+
+- The documented `uv tool install` line now works: it uses `--find-links https://packagetrack.dev/cli/`.
+  A `...-latest.whl` URL is rejected by uv before the request is made.
+
 ## [0.1.0] - 2026-09-14
 
 ### Added
@@ -12,5 +19,6 @@ is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - First release as a separate package. Previously shipped as `packagetrackdev mcp`.
 - Tools: `package_changes`, `package_versions`, `search_packages`, `list_projects`, `project_report`.
 
-[Unreleased]: https://github.com/packagetrack-dev/packagetrackdev-mcp/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/packagetrack-dev/packagetrackdev-mcp/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/packagetrack-dev/packagetrackdev-mcp/releases/tag/v0.1.1
 [0.1.0]: https://github.com/packagetrack-dev/packagetrackdev-mcp/releases/tag/v0.1.0

@@ -20,7 +20,7 @@ Installs `uv` if needed, then this server and the
 as `uv` tools. To install only the server:
 
 ```sh
-uv tool install "packagetrackdev-mcp @ https://packagetrack.dev/cli/packagetrackdev-mcp-latest.whl"
+uv tool install --find-links https://packagetrack.dev/cli/ packagetrackdev-mcp
 ```
 
 Requires Python 3.11+.
