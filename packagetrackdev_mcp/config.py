@@ -32,6 +32,16 @@ def _file_values() -> dict:
         return {}
 
 
+def key_source(api_key: str | None) -> str | None:
+    """Return where `api_key` came from: "env", "file", "flag", or None."""
+    if not api_key:
+        return None
+    env_key = os.environ.get(ENV_KEY)
+    if env_key:
+        return "env" if env_key == api_key else "flag"
+    return "file" if _file_values().get("api_key") == api_key else "flag"
+
+
 def load(api_key: str | None = None, server: str | None = None) -> Config:
     values = _file_values()
     return Config(

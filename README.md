@@ -64,6 +64,7 @@ Optional environment variables:
 | `search_packages` | Search the archive by name. | no |
 | `list_projects` | Projects pushed with `packagetrackdev push` and how far behind each is. | yes |
 | `project_report` | Withdrawn versions and outdated dependencies in one project, with the notable release-note lines. | yes |
+| `import_project` | Push a project: reads a lock file on your machine (`file_path`) or takes names and versions. A new name makes a new project; an existing one is updated. | yes |
 
 A package the archive does not hold yet is fetched on request; ask again
 after a minute.
@@ -83,9 +84,10 @@ Before upgrading a dependency, call packagetrack's package_changes with the inst
 
 ## Privacy
 
-A tool call sends a package name and version strings. No code, file paths or
-repository names leave the machine. The server stores nothing and calls no
-model.
+A tool call sends package names and version strings, plus the project name
+for `import_project`. A lock file is read on your machine; no code, file
+contents, file paths or repository names leave it. The server stores nothing
+and calls no model.
 
 ## Debugging
 
