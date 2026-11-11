@@ -157,6 +157,7 @@ async def test_list_tools():
         "list_projects",
         "project_report",
         "import_project",
+        "update_status",
     }
     for name in ("list_projects", "project_report", "import_project"):
         assert "API key" in tools[name].description
@@ -1645,6 +1646,59 @@ async def test_a_lock_file_keeps_its_parent_chains(tmp_path):
     assert by_name["sqlparse"]["parents"] == ["django"]
 
 
+async def test_a_pnpm_lock_is_read_here_with_its_parents(tmp_path):
+    path = _requirements(
+        tmp_path,
+        "pnpm-lock.yaml",
+        "lockfileVersion: '9.0'\n\n"
+        "importers:\n\n  .:\n    dependencies:\n      debug:\n"
+        "        specifier: ^4.3.4\n        version: 4.3.4\n\n"
+        "packages:\n\n  debug@4.3.4:\n    resolution: {integrity: sha512-PRWF}\n\n"
+        "  ms@2.1.2:\n    resolution: {integrity: sha512-sGkP}\n\n"
+        "snapshots:\n\n  debug@4.3.4:\n    dependencies:\n      ms: 2.1.2\n\n"
+        "  ms@2.1.2: {}\n",
+    )
+    server, _, posted = _import_world(existing=[])
+
+    await _text(server, "import_project", name="web", file_path=str(path))
+
+    body = posted[0]
+    assert body["purl_type"] == "npm"
+    assert body["source_file"] == "pnpm-lock.yaml"
+    by_name = {d["name"]: d for d in body["dependencies"]}
+    assert by_name["debug"]["parents"] == []
+    assert by_name["ms"]["parents"] == ["debug"]
+
+
+async def test_a_pubspec_lock_imports_as_pub(tmp_path):
+    path = _requirements(
+        tmp_path,
+        "pubspec.lock",
+        "packages:\n  http:\n    dependency: \"direct main\"\n"
+        "    description:\n      name: http\n      url: \"https://pub.dev\"\n"
+        "    source: hosted\n    version: \"1.2.1\"\n"
+        "sdks:\n  dart: \">=3.3.0 <4.0.0\"\n",
+    )
+    server, _, posted = _import_world(existing=[])
+
+    await _text(server, "import_project", name="app", file_path=str(path))
+
+    assert posted[0]["purl_type"] == "pub"
+    assert posted[0]["dependencies"][0]["name"] == "http"
+    assert posted[0]["dependencies"][0]["version"] == "1.2.1"
+
+
+async def test_a_binary_bun_lockb_is_never_opened_and_says_what_to_run(tmp_path):
+    path = tmp_path / "bun.lockb"
+    path.write_bytes(b"#!/usr/bin/env bun\nbun-lockfile-format-v0\n\x00")
+    server, seen, _ = _import_world(existing=[])
+
+    text = await _refused(server, "import_project", name="web", file_path=str(path))
+
+    assert "bun install --save-text-lockfile" in text
+    assert seen == []
+
+
 async def test_a_file_that_is_not_a_dependency_file_is_never_opened(tmp_path):
     for name in ("id_ed25519", ".env", "credentials", "settings.py"):
         path = _requirements(tmp_path, name, "django==5.0\n")
@@ -1782,6 +1836,7 @@ async def test_every_tool_says_whether_it_writes():
             "destructiveHint": True,
             "idempotentHint": True,
         },
+        "update_status": {"readOnlyHint": True, "openWorldHint": False},
     }
 
 

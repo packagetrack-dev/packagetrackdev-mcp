@@ -7,10 +7,11 @@ import json
 import logging
 import re
 import tomllib
+import xml.etree.ElementTree as ElementTree
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import sbom
+from . import readers, sbom, yamlish
 
 log = logging.getLogger(__name__)
 
@@ -43,17 +44,32 @@ class Project:
 LOCKFILES = (
     ("npm", "package-lock.json"),
     ("npm", "npm-shrinkwrap.json"),
+    ("npm", "pnpm-lock.yaml"),
+    ("npm", "yarn.lock"),
+    ("npm", "bun.lock"),
     ("pypi", "uv.lock"),
     ("pypi", "poetry.lock"),
+    ("pypi", "Pipfile.lock"),
     ("cargo", "Cargo.lock"),
     ("composer", "composer.lock"),
+    ("pub", "pubspec.lock"),
+    ("nuget", "packages.lock.json"),
+    ("maven", "gradle.lockfile"),
     ("go", "go.mod"),
 )
 
 MANIFESTS = (
     ("npm", "package.json"),
     ("pypi", "requirements.txt"),
+    ("maven", "pom.xml"),
 )
+
+UNREADABLE = {
+    "bun.lockb": (
+        "bun.lockb is a binary lock file and is not read. Run "
+        "`bun install --save-text-lockfile` once to write bun.lock beside it."
+    ),
+}
 
 
 def ecosystems() -> tuple[str, ...]:
@@ -69,6 +85,19 @@ def find(project: Path) -> list[tuple[str, Path]]:
         if ecosystem not in chosen and path.is_file():
             chosen[ecosystem] = path
     return [(ecosystem, path) for ecosystem, path in chosen.items()]
+
+
+def hints(project: Path) -> list[str]:
+    """Say what to do about lock files here that cannot be read."""
+    if not project.is_dir() or (project / "bun.lock").is_file():
+        return []
+    return [hint for name, hint in UNREADABLE.items() if (project / name).is_file()]
+
+
+def binary_hint(filename: str) -> str | None:
+    """Return what to do instead when `filename` is a lock file we cannot read."""
+    base = filename.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    return next((h for n, h in UNREADABLE.items() if n.lower() == base), None)
 
 
 DECLARATIONS = frozenset(name for _, name in MANIFESTS)
@@ -107,6 +136,12 @@ def detect(content: str, filename: str | None = None) -> tuple[str, str] | None:
             if len(groups) != 1:
                 return None
             return next(iter(groups)), which
+        if readers.looks_like_bun(data):
+            return "npm", "bun.lock"
+        if readers.looks_like_pipfile_lock(data):
+            return "pypi", "Pipfile.lock"
+        if readers.looks_like_nuget_lock(data):
+            return "nuget", "packages.lock.json"
         if isinstance(data.get("packages"), dict) or "lockfileVersion" in data:
             return "npm", "package-lock.json"
         if isinstance(data.get("packages"), list) or isinstance(
@@ -136,6 +171,21 @@ def detect(content: str, filename: str | None = None) -> tuple[str, str] | None:
             return "cargo", "Cargo.lock"
         return None
 
+    if content.lstrip().startswith("{"):
+        try:
+            if readers.looks_like_bun(readers.jsonc_loads(content)):
+                return "npm", "bun.lock"
+        except ValueError:
+            pass
+
+    yaml_kind = _yaml_kind(content)
+    if yaml_kind is not None:
+        return yaml_kind
+    if readers.looks_like_pom(content):
+        return "maven", "pom.xml"
+    if readers.looks_like_gradle_lockfile(content):
+        return "maven", "gradle.lockfile"
+
     if _looks_like_gomod(content):
         return "go", "go.mod"
 
@@ -150,14 +200,53 @@ def detect(content: str, filename: str | None = None) -> tuple[str, str] | None:
     return None
 
 
+def _yaml_kind(content: str) -> tuple[str, str] | None:
+    """Recognise the YAML-shaped lock files by their own markers."""
+    head = content[:2000]
+    if "# yarn lockfile v1" in head or re.search(
+        r"^__metadata:\s*$", content, re.MULTILINE
+    ):
+        return "npm", "yarn.lock"
+    if re.search(r"^lockfileVersion:\s*['\"]?\d", head, re.MULTILINE):
+        return "npm", "pnpm-lock.yaml"
+    if re.search(r"^packages:\s*$", content, re.MULTILINE):
+        try:
+            if readers.looks_like_pubspec_lock(yamlish.loads(content)):
+                return "pub", "pubspec.lock"
+        except ValueError:
+            return None
+    return None
+
+
 FORMATS_BY_SUFFIX = {
     ".json": frozenset(
-        {"package-lock.json", "package.json", "composer.lock", *sbom.FORMATS}
+        {
+            "package-lock.json",
+            "package.json",
+            "composer.lock",
+            "bun.lock",
+            "Pipfile.lock",
+            "packages.lock.json",
+            *sbom.FORMATS,
+        }
     ),
-    ".lock": frozenset({"uv.lock", "poetry.lock", "Cargo.lock", "composer.lock"}),
+    ".lock": frozenset(
+        {
+            "uv.lock",
+            "poetry.lock",
+            "Cargo.lock",
+            "composer.lock",
+            "yarn.lock",
+            "bun.lock",
+            "Pipfile.lock",
+            "pubspec.lock",
+        }
+    ),
+    ".lockfile": frozenset({"gradle.lockfile"}),
     ".mod": frozenset({"go.mod"}),
     ".txt": frozenset({"requirements.txt"}),
 }
+
 REQUIREMENTS_WORDS = ("requirement", "constraint")
 
 NOT_A_DEPENDENCY_NAME = "not_a_dependency_name"
@@ -228,7 +317,29 @@ def read(ecosystem: str, path: Path) -> Project | None:
     if content is None:
         log.warning("could not read %s: not UTF-8 or marked UTF-16 text", path)
         return None
-    return parse(ecosystem, path.name, content)
+    return parse(ecosystem, path.name, content, declared=_declared_beside(path))
+
+
+def _declared_beside(path: Path) -> dict[str, str] | None:
+    """Return what the manifest beside a lock declares, when the lock omits it."""
+    try:
+        if path.name == "yarn.lock":
+            manifest = path.with_name("package.json")
+            if manifest.is_file():
+                data = _mapping(json.loads(decode(manifest.read_bytes()) or ""))
+                declared: dict[str, str] = {}
+                for kind in _NPM_DEPENDENCY_FIELDS:
+                    for name, spec in _mapping(data.get(kind)).items():
+                        if isinstance(spec, str):
+                            declared[name] = spec
+                return declared
+        if path.name == "Pipfile.lock":
+            manifest = path.with_name("Pipfile")
+            if manifest.is_file():
+                return readers.pipfile_names(decode(manifest.read_bytes()) or "")
+    except (OSError, ValueError, tomllib.TOMLDecodeError) as exc:
+        log.warning("could not read the manifest beside %s: %s", path, exc)
+    return None
 
 
 def _read_sbom(ecosystem: str, filename: str, content: str) -> Project | None:
@@ -304,13 +415,23 @@ def _without_credentials(project: Project) -> Project:
     return project
 
 
-def parse(ecosystem: str, filename: str, content: str) -> Project | None:
+def parse(
+    ecosystem: str,
+    filename: str,
+    content: str,
+    declared: dict[str, str] | None = None,
+) -> Project | None:
     """Parse lock or manifest content by canonical file name."""
-    project = _parse(ecosystem, filename, content)
+    project = _parse(ecosystem, filename, content, declared)
     return _without_credentials(project) if project is not None else None
 
 
-def _parse(ecosystem: str, filename: str, content: str) -> Project | None:
+def _parse(
+    ecosystem: str,
+    filename: str,
+    content: str,
+    declared: dict[str, str] | None = None,
+) -> Project | None:
     """Parse by canonical file name, credentials and all."""
     content = content.removeprefix(_BOM)
     try:
@@ -326,10 +447,26 @@ def _parse(ecosystem: str, filename: str, content: str) -> Project | None:
             return _read_composer(ecosystem, filename, content)
         if filename == "Cargo.lock":
             return _read_cargo(ecosystem, filename, content)
+        if filename == "yarn.lock":
+            return readers.read_yarn(ecosystem, filename, content, declared)
+        if filename == "pnpm-lock.yaml":
+            return readers.read_pnpm(ecosystem, filename, content)
+        if filename == "bun.lock":
+            return readers.read_bun(ecosystem, filename, content)
+        if filename == "Pipfile.lock":
+            return readers.read_pipfile_lock(ecosystem, filename, content, declared)
+        if filename == "pubspec.lock":
+            return readers.read_pubspec_lock(ecosystem, filename, content)
+        if filename == "packages.lock.json":
+            return readers.read_nuget_lock(ecosystem, filename, content)
+        if filename == "gradle.lockfile":
+            return readers.read_gradle_lockfile(ecosystem, filename, content)
+        if filename == "pom.xml":
+            return readers.read_pom(ecosystem, filename, content)
         if filename.endswith(".json"):
             return _read_npm(ecosystem, filename, content)
         return _read_toml(ecosystem, filename, content)
-    except (ValueError, tomllib.TOMLDecodeError) as exc:
+    except (ValueError, tomllib.TOMLDecodeError, ElementTree.ParseError) as exc:
         log.warning("could not parse %s: %s", filename, exc)
         return None
     except (AttributeError, TypeError, KeyError) as exc:

@@ -11,17 +11,34 @@ which have been withdrawn.
 
 ## Install
 
+macOS and Linux:
+
 ```sh
 curl -fsSL https://packagetrack.dev/install.sh | sh
 ```
 
+Windows (PowerShell):
+
+```powershell
+irm https://packagetrack.dev/install.ps1 | iex
+```
+
 Installs `uv` if needed, then this server and the
 [packagetrackdev](https://github.com/packagetrack-dev/packagetrackdev) CLI
-as `uv` tools. To install only the server:
+as `uv` tools, each checked against its published SHA256 first. On Windows,
+close the coding agent that runs this server before installing over it:
+Windows keeps a running program's files locked. To reinstall or update, run
+the same command again. The checked wheels stay in `~/.packagetrack/wheels`:
+`uv` records the file it installed from, and `uv tool upgrade --all` reads it
+again.
 
-```sh
-uv tool install --find-links https://packagetrack.dev/cli/ packagetrackdev-mcp
-```
+Limits: the checksum covers this package's own wheel. Its dependencies (the
+MCP SDK and what it needs) are downloaded by `uv` from PyPI and rest on
+PyPI's own checks, not on ours.
+
+Where scripts are blocked, or to install only the server, follow
+[the steps by hand](https://packagetrack.dev/install/manual): download the
+file, check its SHA256 yourself, install it with `uv`.
 
 Requires Python 3.11+.
 
@@ -54,6 +71,7 @@ Optional environment variables:
 |---|---|
 | `PACKAGETRACK_API_KEY` | Enables the project tools. Create a key at [packagetrack.dev/app/keys](https://packagetrack.dev/app/keys). Also read from `~/.packagetrack/config.toml`, written by `packagetrackdev login`. |
 | `PACKAGETRACK_SERVER` | Server URL. Default: `https://packagetrack.dev`. |
+| `PACKAGETRACK_NO_AUTO_UPDATE` | Set to `1` to turn off updates at start. |
 
 ## Tools
 
@@ -82,12 +100,63 @@ Agents do not always reach for tools on their own. Adding one line to
 Before upgrading a dependency, call packagetrack's package_changes with the installed and target versions.
 ```
 
+## Updates
+
+The server updates itself when it starts. Before any tool runs it asks
+`https://packagetrack.dev/cli/versions.json` for the newest release. If that
+release is newer, the server downloads it, checks its SHA256, unpacks it
+under `~/.packagetrack/mcp/` and runs it. Nothing installed is overwritten,
+so this works the same on Linux, macOS and Windows.
+
+If the site cannot be reached within a few seconds, or the download fails,
+the installed release starts. After a lost connection the server waits an
+hour before asking again. A release that needs newer dependencies than the
+installed ones is not taken; run the install script again to get it.
+
+`packagetrackdev-mcp --version` shows the installed release and, when an
+update is the one that runs, that one too: `0.2.0 (active: 0.2.1)`.
+
+A server that is already running keeps its release until the coding agent
+restarts it. When a newer release is waiting, or the newest one could not
+start here, tool replies end with a short note. The `update_status` tool
+says what to do, reading local files only; `packagetrackdev-mcp doctor`
+says the same in a terminal. When only the install script can fix it,
+both show the install command, for the user to run.
+
+Updates are off for a server pointed at another `PACKAGETRACK_SERVER`, for
+an editable install, and with `PACKAGETRACK_NO_AUTO_UPDATE=1`, which also
+returns to the installed release.
+
+Limits: the checksum covers this package's own wheel, and its dependencies
+come from PyPI through `uv`. Releases are not signed: the checksum comes
+from the same site as the wheel. Releases on this computer are trusted as
+far as your user account is; on macOS and Linux a release folder that
+another user owns or can write to is skipped.
+
+## Uninstall
+
+```sh
+uv tool uninstall packagetrackdev-mcp packagetrackdev
+claude mcp remove packagetrackdev
+```
+
+Then delete `~/.packagetrack/wheels` (`%USERPROFILE%\.packagetrack\wheels`
+on Windows), the checked wheels `uv` installed from, and
+`~/.packagetrack/mcp`, the updates the server downloaded. Uninstall first:
+while a tool is installed, `uv tool upgrade --all` reads its wheel there. On
+Windows, close the coding agent before uninstalling. The rest of
+`~/.packagetrack` holds your settings and API key (`config.toml`); delete
+the whole folder to remove everything.
+
 ## Privacy
 
 A tool call sends package names and version strings, plus the project name
 for `import_project`. A lock file is read on your machine; no code, file
 contents, file paths or repository names leave it. The server stores nothing
 and calls no model.
+
+Each start also sends one request to `packagetrack.dev` for the newest
+version number, unless updates are turned off.
 
 ## Debugging
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import re
 import sys
@@ -19,7 +20,7 @@ else:
 import httpx
 from pydantic import BaseModel
 
-from packagetrackdev_mcp import config, messages
+from packagetrackdev_mcp import config, messages, update
 from packagetrackdev_mcp._vendor import lockfiles, sbom
 
 REQUEST_TIMEOUT = 60.0
@@ -84,7 +85,11 @@ exists has its dependency list updated, so use the name the user means.
 
 Every other tool reads. What they send is package names and version strings: \
 no file paths, no file contents, no code. import_project can read a lock file \
-on this machine; only the names and versions in it are sent."""
+on this machine; only the names and versions in it are sent.
+
+If a reply ends with a note about the version of these tools, call \
+update_status and follow what it says; it reads local files only and \
+changes nothing."""
 
 _UNHELD = {
     "not_found": "{registry} has no package named {name}.",
@@ -769,6 +774,9 @@ def read_lock_file(file_path: str) -> LockFile | str:
     path = Path(file_path).expanduser()
     base = path.name
     if not lockfiles.may_open(base):
+        hint = lockfiles.binary_hint(base)
+        if hint:
+            return f"{hint} Nothing was pushed."
         return (
             f"{base!r} is not a dependency file, so it was not opened. "
             f"{SUPPORTED_FILES_SENTENCE} Nothing was pushed."
@@ -1037,6 +1045,23 @@ def build_server(
     def refuse(text: str) -> NoReturn:
         raise ToolError(text)
 
+    def noted(tool):
+        @functools.wraps(tool)
+        async def reply(*args, **kwargs):
+            try:
+                text = await tool(*args, **kwargs)
+            except ToolError as exc:
+                note = update.reply_note(settings)
+                if note is None:
+                    raise
+                raise ToolError(f"{exc}\n\n{note}") from None
+            note = update.reply_note(settings)
+            if note is None or not isinstance(text, str):
+                return text
+            return f"{text}\n\n{note}"
+
+        return reply
+
     def held(data: dict[str, Any]) -> dict[str, Any]:
         if data.get("state") == "rate_limited":
             refuse(SCAN_RATE_LIMITED.format(server=archive.server))
@@ -1045,17 +1070,32 @@ def build_server(
         return data
 
     reads = ToolAnnotations(read_only_hint=True)
+    local = ToolAnnotations(read_only_hint=True, open_world_hint=False)
     pushes = ToolAnnotations(
         read_only_hint=False, destructive_hint=True, idempotent_hint=True
     )
 
-    archive = Archive(settings or config.load(), client)
+    settings = settings or config.load()
+    archive = Archive(settings, client)
     server = MCPServer(
         SERVER_NAME,
         instructions=INSTRUCTIONS,
         website_url="https://packagetrack.dev",
         version=_version(),
     )
+
+    @server.tool(
+        name="update_status",
+        annotations=local,
+        description=(
+            "Whether this PackageTrack MCP server runs the newest version on "
+            "this computer, and what to do if not. Reads local files only: no "
+            "network, and it changes nothing. Call it when a reply ends with a "
+            "note about the version of these tools."
+        ),
+    )
+    async def update_status() -> str:
+        return update.status_text(settings)
 
     @server.tool(
         name="package_changes",
@@ -1071,6 +1111,7 @@ def build_server(
             "for one note."
         ),
     )
+    @noted
     async def package_changes(
         ecosystem: Ecosystem,
         name: str,
@@ -1126,6 +1167,7 @@ def build_server(
             "upgrade target or to check that a version has not been withdrawn."
         ),
     )
+    @noted
     async def package_versions(ecosystem: Ecosystem, name: str) -> str:
         try:
             data = await archive.public(f"/api/public/package/{ecosystem}/{name}")
@@ -1142,6 +1184,7 @@ def build_server(
             "every registry with a one-line summary each."
         ),
     )
+    @noted
     async def search_packages(query: str) -> str:
         try:
             data = await archive.public("/api/public/search", q=query)
@@ -1159,6 +1202,7 @@ def build_server(
             "and how many are behind or withdrawn. Needs a PackageTrack API key."
         ),
     )
+    @noted
     async def list_projects() -> str:
         try:
             data = await archive.private("/api/v1/projects")
@@ -1179,6 +1223,7 @@ def build_server(
             "list_projects gives the names."
         ),
     )
+    @noted
     async def project_report(name: str) -> str:
         try:
             data = await archive.private(f"/api/v1/projects/{name}/report")
@@ -1237,6 +1282,7 @@ def build_server(
             "code."
         ),
     )
+    @noted
     async def import_project(
         name: str,
         purl_type: Ecosystem | None = None,
